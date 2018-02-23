@@ -22,8 +22,8 @@ public enum IceCreamKey: String {
     case subscriptionIsLocallyCachedKey
     case hasCustomZoneCreatedKey
     
-    public var value: String {
-        return "icecream.keys." + rawValue
+    public func value(recordType: String) -> String {
+        return "icecream.keys.\(rawValue).\(recordType)"
     }
 }
 
@@ -33,21 +33,24 @@ public enum IceCreamKey: String {
 /// Or your user will not save the same subscription again. So you got trouble.
 /// The right way is remove old subscription first and then save new subscription.
 public struct IceCreamConstant {
-    public static let cloudKitSubscriptionID = "private_changes"
+    public static let cloudKitSubscriptionIdSuffix = "private_changes"
+    public static func cloudKitSubscriptionID(recordType: String) -> String {
+        return "\(recordType)_\(IceCreamConstant.cloudKitSubscriptionIdSuffix)"
+    }
 }
 
-public final class SyncEngine<T: Object & CKRecordConvertible & CKRecordRecoverable> {
+public class SyncEngine<T: Object & CKRecordConvertible & CKRecordRecoverable> {
     
     /// Notifications are delivered as long as a reference is held to the returned notification token. You should keep a strong reference to this token on the class registering for updates, as notifications are automatically unregistered when the notification token is deallocated.
     /// For more, reference is here: https://realm.io/docs/swift/latest/#notifications
-    private var notificationToken: NotificationToken?
+    var notificationToken: NotificationToken?
     
-//    fileprivate var changedRecordZoneID: CKRecordZoneID?
+        fileprivate var changedRecordZoneID: CKRecordZoneID?
     
     /// Indicates the private database in default container
-    private let privateDatabase = CKContainer.default().privateCloudDatabase
+    let privateDatabase = CKContainer.default().privateCloudDatabase
     
-    private let errorHandler = ErrorHandler()
+    let errorHandler = ErrorHandler()
     
     /// We recommand process the initialization when app launches
     public init() {
@@ -55,6 +58,7 @@ public final class SyncEngine<T: Object & CKRecordConvertible & CKRecordRecovera
         CKContainer.default().accountStatus { [weak self] (status, error) in
             guard let `self` = self else { return }
             if status == CKAccountStatus.available {
+                UserDefaults.standard.set(true, forKey: "cloudAvailable")
                 
                 /// 1. Fetch changes in the Cloud
                 /// Apple suggests that we should fetch changes in database, *especially* the very first launch.
@@ -68,6 +72,9 @@ public final class SyncEngine<T: Object & CKRecordConvertible & CKRecordRecovera
                 
                 if (!`self`.isCustomZoneCreated) {
                     `self`.createCustomZone()
+                } else {
+                    `self`.createDatabaseSubscription()
+
                 }
                 
                 `self`.startObservingRemoteChanges()
@@ -79,8 +86,6 @@ public final class SyncEngine<T: Object & CKRecordConvertible & CKRecordRecovera
                 
                 NotificationCenter.default.addObserver(self, selector: #selector(self.cleanUp), name: .UIApplicationWillTerminate, object: nil)
                 
-                if `self`.subscriptionIsLocallyCached { return }
-                `self`.createDatabaseSubscription()
                 
             } else {
                 /// Handle when user account is not available
@@ -91,12 +96,12 @@ public final class SyncEngine<T: Object & CKRecordConvertible & CKRecordRecovera
     
     /// When you commit a write transaction to a Realm, all other instances of that Realm will be notified, and be updated automatically.
     /// For more: https://realm.io/docs/swift/latest/#writes
-
+    
     private func registerLocalDatabase() {
+        print("register local database")
         let objects = Cream<T>().realm.objects(T.self)
         notificationToken = objects.observe({ [weak self](changes) in
             guard let `self` = self else { return }
-            
             switch changes {
             case .initial(let collection):
                 print("Inited:" + "\(collection)")
@@ -146,7 +151,7 @@ extension SyncEngine {
         
         self.syncRecordsToCloudKit(recordsToStore: recordsToStore, recordIDsToDelete: recordIDsToDelete)
     }
-
+    
 }
 
 /// Chat to the CloudKit API directly
@@ -155,18 +160,24 @@ extension SyncEngine {
     /// The changes token, for more please reference to https://developer.apple.com/videos/play/wwdc2016/231/
     var databaseChangeToken: CKServerChangeToken? {
         get {
+            let userDefaultsKey: String = IceCreamKey.databaseChangesTokenKey.value(recordType: T.recordType)
             /// For the very first time when launching, the token will be nil and the server will be giving everything on the Cloud to client
             /// In other situation just get the unarchive the data object
-            guard let tokenData = UserDefaults.standard.object(forKey: IceCreamKey.databaseChangesTokenKey.value) as? Data else { return nil }
-            return NSKeyedUnarchiver.unarchiveObject(with: tokenData) as? CKServerChangeToken
+            guard let tokenData = UserDefaults.standard.object(forKey: userDefaultsKey) as? Data else { return nil }
+            
+            let serverChangeToken = NSKeyedUnarchiver.unarchiveObject(with: tokenData) as? CKServerChangeToken
+            
+            print("Read databaseChangeToken from UserDefaults: Key(\(userDefaultsKey)) - Value(\(String(describing: serverChangeToken)))")
+            
+            return serverChangeToken
         }
         set {
             guard let n = newValue else {
-                UserDefaults.standard.removeObject(forKey: IceCreamKey.databaseChangesTokenKey.value)
+                UserDefaults.standard.removeObject(forKey: IceCreamKey.databaseChangesTokenKey.value(recordType: T.recordType))
                 return
             }
             let data = NSKeyedArchiver.archivedData(withRootObject: n)
-            UserDefaults.standard.set(data, forKey: IceCreamKey.databaseChangesTokenKey.value)
+            UserDefaults.standard.set(data, forKey: IceCreamKey.databaseChangesTokenKey.value(recordType: T.recordType))
         }
     }
     
@@ -174,49 +185,49 @@ extension SyncEngine {
         get {
             /// For the very first time when launching, the token will be nil and the server will be giving everything on the Cloud to client
             /// In other situation just get the unarchive the data object
-            guard let tokenData = UserDefaults.standard.object(forKey: IceCreamKey.zoneChangesTokenKey.value) as? Data else { return nil }
+            guard let tokenData = UserDefaults.standard.object(forKey: IceCreamKey.zoneChangesTokenKey.value(recordType: T.recordType)) as? Data else { return nil }
             return NSKeyedUnarchiver.unarchiveObject(with: tokenData) as? CKServerChangeToken
         }
         set {
             guard let n = newValue else {
-                UserDefaults.standard.removeObject(forKey: IceCreamKey.zoneChangesTokenKey.value)
+                UserDefaults.standard.removeObject(forKey: IceCreamKey.zoneChangesTokenKey.value(recordType: T.recordType))
                 return
             }
             let data = NSKeyedArchiver.archivedData(withRootObject: n)
-            UserDefaults.standard.set(data, forKey: IceCreamKey.zoneChangesTokenKey.value)
+            UserDefaults.standard.set(data, forKey: IceCreamKey.zoneChangesTokenKey.value(recordType: T.recordType))
         }
     }
     
     /// Cuz we only need to do subscription once succeed
-    var subscriptionIsLocallyCached: Bool {
+    public var subscriptionIsLocallyCached: Bool {
         get {
-            guard let flag = UserDefaults.standard.object(forKey: IceCreamKey.subscriptionIsLocallyCachedKey.value) as? Bool  else { return false }
+            guard let flag = UserDefaults.standard.object(forKey: IceCreamKey.subscriptionIsLocallyCachedKey.value(recordType: T.recordType)) as? Bool  else { return false }
             return flag
         }
         set {
-            UserDefaults.standard.set(newValue, forKey: IceCreamKey.subscriptionIsLocallyCachedKey.value)
+            UserDefaults.standard.set(newValue, forKey: IceCreamKey.subscriptionIsLocallyCachedKey.value(recordType: T.recordType))
         }
     }
     
     /*
-    var isVeryFirstLaunch: Bool {
-        get {
-            guard let flag = UserDefaults.standard.object(forKey: IceCreamConstants.isVeryFirstLaunchKey) as? Bool else { return true }
-            return flag
-        }
-        set {
-            UserDefaults.standard.set(newValue, forKey: IceCreamConstants.isVeryFirstLaunchKey)
-        }
-    }
-    */
+     var isVeryFirstLaunch: Bool {
+     get {
+     guard let flag = UserDefaults.standard.object(forKey: IceCreamConstants.isVeryFirstLaunchKey) as? Bool else { return true }
+     return flag
+     }
+     set {
+     UserDefaults.standard.set(newValue, forKey: IceCreamConstants.isVeryFirstLaunchKey)
+     }
+     }
+     */
     
     var isCustomZoneCreated: Bool {
         get {
-            guard let flag = UserDefaults.standard.object(forKey: IceCreamKey.hasCustomZoneCreatedKey.value) as? Bool else { return false }
+            guard let flag = UserDefaults.standard.object(forKey: IceCreamKey.hasCustomZoneCreatedKey.value(recordType: T.recordType)) as? Bool else { return false }
             return flag
         }
         set {
-            UserDefaults.standard.set(newValue, forKey: IceCreamKey.hasCustomZoneCreatedKey.value)
+            UserDefaults.standard.set(newValue, forKey: IceCreamKey.hasCustomZoneCreatedKey.value(recordType: T.recordType))
         }
     }
     
@@ -234,16 +245,16 @@ extension SyncEngine {
         }
         
         /// Cuz we only have one custom zone, so we don't need to store the CKRecordZoneID temporarily
-        /*
-        changesOperation.recordZoneWithIDChangedBlock = { [weak self] zoneID in
-            guard let `self` = self else { return }
-            `self`.changedRecordZoneID = zoneID
-        }
-        */
+        
+         changesOperation.recordZoneWithIDChangedBlock = { [weak self] zoneID in
+         guard let `self` = self else { return }
+         `self`.changedRecordZoneID = zoneID
+         }
+        
         changesOperation.fetchDatabaseChangesCompletionBlock = {
             [weak self]
             newToken, _, error in
-             guard let `self` = self else { return }
+            guard let `self` = self else { return }
             switch `self`.errorHandler.resultType(with: error) {
             case .success:
                 `self`.databaseChangeToken = newToken
@@ -289,10 +300,10 @@ extension SyncEngine {
                 print("There is something wrong with the converson from cloud record to local object")
                 return
             }
-
+            
             DispatchQueue.main.async {
                 let realm = try! Realm()
-
+                
                 /// If your model class includes a primary key, you can have Realm intelligently update or add objects based off of their primary key values using Realm().add(_:update:).
                 /// https://realm.io/docs/swift/latest/#objects-with-primary-keys
                 realm.beginWrite()
@@ -314,7 +325,6 @@ extension SyncEngine {
                     // Not found in local
                     return
                 }
-                CreamAsset.deleteCreamAssetFile(with: recordId.recordName)
                 realm.beginWrite()
                 realm.delete(object)
                 if let token = `self`.notificationToken {
@@ -352,7 +362,7 @@ extension SyncEngine {
         
         privateDatabase.add(changesOp)
     }
- 
+    
     
     /// Create new custom zones
     /// You can(but you shouldn't) invoke this method more times, but the CloudKit is smart and will handle that for you
@@ -364,11 +374,11 @@ extension SyncEngine {
             switch `self`.errorHandler.resultType(with: error) {
             case .success:
                 DispatchQueue.main.async {
-                    completion?(nil)
+                    `self`.createDatabaseSubscription()
                 }
             case .retry(let timeToWait, _):
                 `self`.errorHandler.retryOperationIfPossible(retryAfter: timeToWait, block: {
-                     `self`.createCustomZone(completion)
+                    `self`.createCustomZone(completion)
                 })
             default:
                 return
@@ -377,72 +387,67 @@ extension SyncEngine {
         
         privateDatabase.add(modifyOp)
     }
- 
-    /// Check if custom zone already exists
-  /* fileprivate func checkCustomZoneExists(_ completion: ((Error?) -> ())? = nil) {
-        let checkZoneOp = CKFetchRecordZonesOperation(recordZoneIDs: [customZoneID])
-        checkZoneOp.fetchRecordZonesCompletionBlock = { dic, error in
-            switch self?.errorHandler.resultType(with: error) {
-            case .success?:
-                DispatchQueue.main.async {
-                    completion?(nil)
-                }
-            case .retry(let timeToWait)?:
-                ErrorHandler.retryOperationIfPossible(retryAfter: timeToWait, block: {
-                    self?.checkCustomZoneExists(completion)
-                })
-            default:
-                return
-            }
-        }
-        privateDatabase.add(checkZoneOp)
-    }
-*/
     
-    fileprivate func createDatabaseSubscription() {
-        // The direct below is the subscribe way that Apple suggests in CloudKit Best Practices(https://developer.apple.com/videos/play/wwdc2016/231/) , but it doesn't work here in my place.
-        /*
-        let subscription = CKDatabaseSubscription(subscriptionID: IceCreamConstants.cloudSubscriptionID)
+    /// Check if custom zone already exists
+    /* fileprivate func checkCustomZoneExists(_ completion: ((Error?) -> ())? = nil) {
+     let checkZoneOp = CKFetchRecordZonesOperation(recordZoneIDs: [customZoneID])
+     checkZoneOp.fetchRecordZonesCompletionBlock = { dic, error in
+     switch self?.errorHandler.resultType(with: error) {
+     case .success?:
+     DispatchQueue.main.async {
+     completion?(nil)
+     }
+     case .retry(let timeToWait)?:
+     ErrorHandler.retryOperationIfPossible(retryAfter: timeToWait, block: {
+     self?.checkCustomZoneExists(completion)
+     })
+     default:
+     return
+     }
+     }
+     privateDatabase.add(checkZoneOp)
+     }
+     */
+    
+     func createDatabaseSubscription() {
+        // The direct below is the subscribe way that Apple suggests in CloudKit Best Practices(https://developer.apple.com/videos/play/wwdc2016/231/)
+        guard subscriptionIsLocallyCached == false else { return }
+        
+        let subscription = CKRecordZoneSubscription(zoneID: T.customZoneID, subscriptionID: IceCreamConstant.cloudKitSubscriptionID(recordType: T.recordType))
+        
+       
+        print("///create database subscription///")
+        print("create database subscription \(subscription)")
 
+        
         let notificationInfo = CKNotificationInfo()
         notificationInfo.shouldSendContentAvailable = true // Silent Push
-         
+        
         subscription.notificationInfo = notificationInfo
-
+        
         let createOp = CKModifySubscriptionsOperation(subscriptionsToSave: [subscription], subscriptionIDsToDelete: [])
         createOp.modifySubscriptionsCompletionBlock = { _, _, error in
-            guard error == nil else { return }
+            if let err = error {
+                print("CloudKitDatabase: FAILED saving subscription \(subscription.subscriptionID)\nERROR: \(err)")
+                return
+            }
+            print("CloudKitDatabase: Successfully saved CKDatabaseSubscription \(subscription.subscriptionID)")
             self.subscriptionIsLocallyCached = true
         }
         createOp.qualityOfService = .utility
         privateDatabase.add(createOp)
-         */
-        
-        /// So I use the @Guilherme Rambo's plan: https://github.com/insidegui/NoteTaker
-        let subscription = CKQuerySubscription(recordType: T.recordType, predicate: NSPredicate(value: true), subscriptionID: IceCreamConstant.cloudKitSubscriptionID, options: [.firesOnRecordCreation, .firesOnRecordUpdate, .firesOnRecordDeletion])
-        let notificationInfo = CKNotificationInfo()
-        notificationInfo.shouldSendContentAvailable = true // Silent Push
-        subscription.notificationInfo = notificationInfo
-        
-        privateDatabase.save(subscription) { [weak self](_, error) in
-            guard let `self` = self else { return }
-            switch `self`.errorHandler.resultType(with: error) {
-            case .success:
-                print("Register remote successfully!")
-                `self`.subscriptionIsLocallyCached = true
-            case .retry(let timeToWait, _):
-                `self`.errorHandler.retryOperationIfPossible(retryAfter: timeToWait, block: {
-                    `self`.createDatabaseSubscription()
-                })
-            default:
-                return
-            }
-        }
     }
     
     fileprivate func startObservingRemoteChanges() {
-        NotificationCenter.default.addObserver(forName: Notifications.cloudKitDataDidChangeRemotely.name, object: nil, queue: OperationQueue.main, using: { [weak self](_) in
-            guard let `self` = self else { return }
+        NotificationCenter.default.addObserver(forName: Notifications.cloudKitDataDidChangeRemotely.name, object: nil, queue: OperationQueue.main, using: { [weak self](notification) in
+            guard let `self` = self, let userInfo = notification.userInfo else { return }
+            
+            let ckNotification = CKNotification(fromRemoteNotificationDictionary: userInfo as! [String: NSObject])
+            
+            guard let subscriptionID = ckNotification.subscriptionID, subscriptionID == IceCreamConstant.cloudKitSubscriptionID(recordType: T.recordType) else { return }
+            
+            print("NOTIFICATION: cloudKitDataDidChangeRemotely\nSUBSCRIPTIONID: \(subscriptionID)")
+            
             `self`.fetchChangesInDatabase()
         })
     }
@@ -484,7 +489,6 @@ extension SyncEngine {
                     /// Cause we will get a error when there is very empty in the cloudKit dashboard
                     /// which often happen when users first launch your app.
                     /// So, we put the subscription process here when we sure there is a record type in CloudKit.
-                    if `self`.subscriptionIsLocallyCached { return }
                     `self`.createDatabaseSubscription()
                 }
             case .retry(let timeToWait, _):
